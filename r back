@@ -1,0 +1,150 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Remove Background (Orang) - BodyPix</title>
+  <style>
+    body { font-family: system-ui, Arial, sans-serif; margin: 0; padding: 24px; background: #0f172a; color: #e2e8f0; }
+    h1 { font-size: 22px; margin: 0 0 12px; }
+    .card { background: #111827; border: 1px solid #1f2937; border-radius: 12px; padding: 20px; max-width: 860px; margin: 0 auto; }
+    .row { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
+    .panel { background: #0b1020; border: 1px solid #1f2937; border-radius: 10px; padding: 12px; }
+    .panel h2 { font-size: 16px; margin: 0 0 10px; color: #93c5fd; }
+    canvas, img { width: 100%; height: auto; border-radius: 8px; background: #0b1220; }
+    .controls { display: flex; gap: 12px; flex-wrap: wrap; margin-top: 12px; }
+    input[type="file"] { color: #e2e8f0; }
+    button, select { background: #1f2937; color: #e2e8f0; border: 1px solid #374151; padding: 8px 12px; border-radius: 8px; cursor: pointer; }
+    button:disabled { opacity: 0.5; cursor: not-allowed; }
+    .tip { font-size: 13px; color: #94a3b8; margin-top: 8px; }
+    .footer { margin-top: 16px; font-size: 12px; color: #94a3b8; }
+    a { color: #93c5fd; text-decoration: none; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h1>Remove Background (orang) – berjalan sepenuhnya di browser</h1>
+    <p class="tip">Unggah foto orang. Model BodyPix memisahkan orang dari latar, lalu hasilnya diekspor sebagai PNG transparan.</p>
+
+    <div class="controls">
+      <input type="file" id="fileInput" accept="image/*" />
+      <select id="modelSelect" title="Pilihan arsitektur">
+        <option value="ResNet50">ResNet50 (lebih akurat, lebih lambat)</option>
+        <option value="MobileNetV1" selected>MobileNetV1 (lebih cepat)</option>
+      </select>
+      <select id="multiplierSelect" title="Kecepatan vs kualitas">
+        <option value="1.0">Multiplier 1.0 (kualitas tinggi)</option>
+        <option value="0.75" selected>0.75 (seimbang)</option>
+        <option value="0.5">0.5 (cepat)</option>
+      </select>
+      <button id="processBtn" disabled>Proses</button>
+      <button id="downloadBtn" disabled>Download PNG</button>
+    </div>
+
+    <div class="row" style="margin-top:16px;">
+      <div class="panel">
+        <h2>Gambar asli</h2>
+        <img id="preview" alt="Preview" />
+      </div>
+      <div class="panel">
+        <h2>Hasil tanpa background</h2>
+        <canvas id="outputCanvas"></canvas>
+      </div>
+    </div>
+
+    <p class="footer">Catatan: Akurat untuk foto orang. Untuk objek selain manusia, pertimbangkan model segmentasi lain atau layanan API.</p>
+  </div>
+
+  <!-- CDN TensorFlow.js + BodyPix -->
+  <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@3.21.0/dist/tf.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/body-pix@2.0.5/dist/body-pix.min.js"></script>
+
+  <script>
+    const fileInput = document.getElementById('fileInput');
+    const preview = document.getElementById('preview');
+    const outputCanvas = document.getElementById('outputCanvas');
+    const processBtn = document.getElementById('processBtn');
+    const downloadBtn = document.getElementById('downloadBtn');
+    const modelSelect = document.getElementById('modelSelect');
+    const multiplierSelect = document.getElementById('multiplierSelect');
+
+    let imgEl = null;
+    let bpModel = null;
+
+    async function loadModel() {
+      processBtn.disabled = true;
+      const arch = modelSelect.value;
+      const multiplier = parseFloat(multiplierSelect.value);
+
+      const opts = arch === 'ResNet50'
+        ? { architecture: 'ResNet50', outputStride: 32, multiplier, quantBytes: 2 }
+        : { architecture: 'MobileNetV1', outputStride: 16, multiplier, quantBytes: 2 };
+
+      bpModel = await bodyPix.load(opts);
+      if (imgEl) processBtn.disabled = false;
+    }
+
+    modelSelect.addEventListener('change', loadModel);
+    multiplierSelect.addEventListener('change', loadModel);
+    loadModel(); // initial
+
+    fileInput.addEventListener('change', (e) => {
+      const file = e.target.files?.[0];
+      if (!file) return;
+      const reader = new FileReader();
+      reader.onload = () => {
+        preview.src = reader.result;
+        preview.onload = () => {
+          imgEl = preview;
+          processBtn.disabled = !bpModel;
+        };
+      };
+      reader.readAsDataURL(file);
+    });
+
+    processBtn.addEventListener('click', async () => {
+      if (!bpModel || !imgEl) return;
+
+      // Segmentasi orang
+      const segmentation = await bpModel.segmentPerson(imgEl, {
+        internalResolution: 'medium',
+        segmentationThreshold: 0.7
+      });
+
+      // Gambar ke canvas dengan latar transparan
+      outputCanvas.width = imgEl.naturalWidth || imgEl.width;
+      outputCanvas.height = imgEl.naturalHeight || imgEl.height;
+      const ctx = outputCanvas.getContext('2d');
+      ctx.clearRect(0, 0, outputCanvas.width, outputCanvas.height);
+
+      // Buat mask dari segmentation
+      const { data: maskData } = segmentation;
+      const imgCanvas = document.createElement('canvas');
+      imgCanvas.width = outputCanvas.width;
+      imgCanvas.height = outputCanvas.height;
+      const imgCtx = imgCanvas.getContext('2d');
+      imgCtx.drawImage(imgEl, 0, 0, imgCanvas.width, imgCanvas.height);
+      const imgPixels = imgCtx.getImageData(0, 0, imgCanvas.width, imgCanvas.height);
+
+      const outPixels = ctx.createImageData(outputCanvas.width, outputCanvas.height);
+      for (let i = 0; i < maskData.length; i++) {
+        const onPerson = maskData[i] === 1; // 1 = orang
+        const idx = i * 4;
+        outPixels.data[idx + 0] = imgPixels.data[idx + 0];
+        outPixels.data[idx + 1] = imgPixels.data[idx + 1];
+        outPixels.data[idx + 2] = imgPixels.data[idx + 2];
+        outPixels.data[idx + 3] = onPerson ? 255 : 0; // transparan di background
+      }
+      ctx.putImageData(outPixels, 0, 0);
+      downloadBtn.disabled = false;
+    });
+
+    downloadBtn.addEventListener('click', () => {
+      const link = document.createElement('a');
+      link.download = 'hasil-remove-bg.png';
+      link.href = outputCanvas.toDataURL('image/png');
+      link.click();
+    });
+  </script>
+</body>
+</html>
